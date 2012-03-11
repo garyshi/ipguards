@@ -1,0 +1,61 @@
+#!/usr/bin/env python
+import sys, os
+import cgi, cgitb
+import anydbm
+import time, datetime
+
+cgitb.enable()
+DBMFILE = '/tmp/ipguards.db'
+
+def authenticate(username, password):
+	if username == 'test' and password == 'config': return True
+	return False
+
+def expire_to_minutes(s):
+	p = s.split(':')
+	p.reverse()
+	minutes = int(p[0])
+	if len(p) >= 2: minutes += int(p[1]) * 60
+	if len(p) >= 3: minutes += int(p[2]) * 60 * 24
+	return minutes
+
+def update_db(username, ipaddr, expire_minutes):
+	now = time.time()
+	active_time = time.localtime(now)
+	expire_time = time.localtime(now + expire_minutes * 60)
+	active_time = time.strftime('%Y-%m-%d %H:%M:%S', active_time)
+	expire_time = time.strftime('%Y-%m-%d %H:%M:%S', expire_time)
+
+	db = anydbm.open(DBMFILE, 'c', 0600)
+	db[username] = 'ipaddr=%s; time=%s; expire=%s' % (ipaddr, active_time, expire_time)
+	db.close()
+	return expire_time
+
+def display_form(form):
+	ipaddr = os.environ['REMOTE_ADDR']
+	print 'Content-Type: text/html'
+	print
+	print '<form method="post" action="?action=submit">'
+	print '<p>Username: <input type="text" name="username"></p>'
+	print '<p>Password: <input type="password" name="password"></p>'
+	print '<p>IP Address: <input type="text" name="ipaddr" value="%s"></p>' % ipaddr
+	print '<p>Expire Time: <input type="text" name="expire" value="1:00"></p>'
+	print '<p><input type="submit"></p>'
+	print '</form>'
+
+def submit_form(form):
+	if not authenticate(form['username'], form['password']):
+		return display_form(form)
+	expire_minutes = expire_to_minutes(form['expire'])
+	expire_time = update_db(form['username'], form['ipaddr'], expire_minutes)
+	print 'Content-Type: text/html'
+	print
+	print 'Access Granted until %s' % expire_time
+
+def main():
+	form = cgi.FieldStorage()
+	action = form.getvalue('action', None)
+	if action == 'submit': submit_form(form)
+	else: display_form(form)
+
+if __name__ == '__main__': main()
