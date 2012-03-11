@@ -1,0 +1,62 @@
+#!/usr/bin/python
+import sys
+import pwd
+import time
+import anydbm
+import logging
+import simplejson
+import socket
+import SocketServer
+
+DBMFILE = '/tmp/ipguards.db'
+SOCKFILE = '/tmp/ipguards.sock'
+SOCKPWD= pwd.getpwnam('apache')
+
+def add_rule(ipaddr):
+	socket.inet_aton(ipaddr) # validate the ipaddr
+	del_rule(ipaddr) # delete first to avoid duplication
+	cmdline = '/sbin/iptables -A ipguards_input -s %s -j ACCEPT' % ipaddr
+	return os.system(cmdline)
+
+def del_rule(ipaddr):
+	socket.inet_aton(ipaddr) # validate the ipaddr
+	cmdline = '/sbin/iptables -D ipguards_input -s %s -j ACCEPT' % ipaddr
+	return os.system(cmdline)
+
+class IPGuardHandler(StreamRequestHandler):
+	def handle(self):
+		try:
+			line = self.rfile.readline()
+			data = simplejson.loads(line)
+			add_rule(data['ipaddr'])
+		except:
+			self.wfile.write('ERROR\n')
+		else:
+			self.wfile.write('OK\n')
+		finally:
+			self.wfile.flush()
+
+class IPGuardServer(UnixStreamServer):
+	timeout = 60
+
+	def handle_timeout(self):
+		now = long(time.time())
+		db = anydbm.open(DBMFILE, 'r')
+		try:
+			for key in db.keys():
+				data = simplejson.loads(db[key])
+				if data['expire'] - now <= 0:
+					del_rule(data['ipaddr'])
+					del db[key]
+		finally:
+			db.close()
+
+if __name__ == '__main__':
+	try:
+		server = IPGuardServer(SOCKFILE, IPGuardHandler)
+		os.chown(SOCKFILE, SOCKPWD.pw_uid, SOCKPWD.pw_gid)
+		os.chmod(SOCKFILE, 0600)
+		server.serve_forever()
+	finally:
+		try: os.unlink(SOCKFILE)
+		except: pass
