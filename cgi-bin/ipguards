@@ -3,6 +3,8 @@ import sys, os
 import cgi, cgitb
 import anydbm
 import time, datetime
+try: from cgi import parse_qs
+except: from urlparse import parse_qs
 
 cgitb.enable()
 DBMFILE = '/tmp/ipguards.db'
@@ -21,8 +23,8 @@ def expire_to_minutes(s):
 
 def update_db(username, ipaddr, expire_minutes):
 	now = time.time()
-	active_time = time.localtime(now)
-	expire_time = time.localtime(now + expire_minutes * 60)
+	active_time = time.gmtime(now)
+	expire_time = time.gmtime(now + expire_minutes * 60)
 	active_time = time.strftime('%Y-%m-%d %H:%M:%S', active_time)
 	expire_time = time.strftime('%Y-%m-%d %H:%M:%S', expire_time)
 
@@ -31,10 +33,8 @@ def update_db(username, ipaddr, expire_minutes):
 	db.close()
 	return expire_time
 
-def display_form(form):
+def display_form():
 	ipaddr = os.environ['REMOTE_ADDR']
-	print 'Content-Type: text/html'
-	print
 	print '<form method="post" action="?action=submit">'
 	print '<p>Username: <input type="text" name="username"></p>'
 	print '<p>Password: <input type="password" name="password"></p>'
@@ -43,19 +43,22 @@ def display_form(form):
 	print '<p><input type="submit"></p>'
 	print '</form>'
 
-def submit_form(form):
-	if not authenticate(form['username'], form['password']):
-		return display_form(form)
-	expire_minutes = expire_to_minutes(form['expire'])
-	expire_time = update_db(form['username'], form['ipaddr'], expire_minutes)
-	print 'Content-Type: text/html'
-	print
-	print 'Access Granted until %s' % expire_time
+def submit_form():
+	form = cgi.FieldStorage()
+	username = form.getvalue('username')
+	if not authenticate(username, form.getvalue('password')):
+		return display_form()
+	expire_minutes = expire_to_minutes(form.getvalue('expire'))
+	expire_time = update_db(username, form.getvalue('ipaddr'), expire_minutes)
+	print 'Access Granted until %s GMT' % expire_time
 
 def main():
-	form = cgi.FieldStorage()
-	action = form.getvalue('action', None)
-	if action == 'submit': submit_form(form)
-	else: display_form(form)
+	print 'Content-Type: text/html'
+	print
+	qs = parse_qs(os.environ['QUERY_STRING'])
+	action = qs.get('action')
+	if action: action = action[0]
+	if action == 'submit': submit_form()
+	else: display_form()
 
 if __name__ == '__main__': main()
