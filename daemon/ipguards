@@ -1,5 +1,9 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 import sys, os, pwd, time
+import getopt, termios
+# module sha is deprecated in new python, but it's hard to be compatible with
+# hmac module with sha and hashlib and keep the same code...
+import binascii, hmac, sha
 import simplejson, anydbm
 import socket, threading, logging
 from SocketServer import UnixStreamServer, ThreadingMixIn, StreamRequestHandler
@@ -14,6 +18,21 @@ def parse_request(line):
 	except: cmd,data = line,''
 	data = simplejson.loads(data)
 	return cmd,data
+
+def sec_input(prompt=''):
+	s = None
+	fd = sys.stdin.fileno()
+	old = termios.tcgetattr(fd)
+	new = termios.tcgetattr(fd)
+	new[3] = new[3] & ~termios.ECHO
+	try:
+		termios.tcsetattr(fd, termios.TCSADRAIN, new)
+		#flush_input(fd)
+		s = raw_input(prompt)
+	finally:
+		termios.tcsetattr(fd, termios.TCSADRAIN, old)
+	print
+	return s
 
 def add_rule(ipaddr):
 	socket.inet_aton(ipaddr) # validate the ipaddr
@@ -89,14 +108,7 @@ class IPGuardServer(ThreadingMixIn, UnixStreamServer):
 		finally:
 			self.lock.release()
 
-if __name__ == '__main__':
-	handler = logging.StreamHandler()
-	formatter = logging.Formatter('%(asctime)s pid=%(process)d %(levelname)s %(message)s')
-	handler.setFormatter(formatter)
-	logger = logging.getLogger(None)
-	logger.addHandler(handler)
-	logger.setLevel(logging.DEBUG)
-
+def daemon(db):
 	# TODO: complain and exit, if ipguards_input chain doesn't exist
 	try: os.unlink(SOCKFILE)
 	except: pass
@@ -109,3 +121,105 @@ if __name__ == '__main__':
 	finally:
 		try: os.unlink(SOCKFILE)
 		except: pass
+
+class UserManager(object):
+	def __init__(self, db):
+		self.db = db
+
+	def list(self):
+		for key in self.db.iterkeys():
+			if not key.startswith('user-'): continue
+			data = simplejson.loads(self.db[key])
+			print key[5:]
+
+	def add(self, username, method, method_data):
+		data = {'method':method}
+		data.update(method_data)
+		self.db['user-%s' % username] = simplejson.dumps(data)
+
+	def modify(self, username):
+
+	def delete(self, username):
+		del self.db['user-%s' % username]
+
+	def passwd(self, username):
+		key = 'user-%s' % username
+		if key not in self.db:
+			print >>sys.stderr, 'Error: user not exist'
+			return False
+		data = simplejson.loads(self.db[key])
+		if data['method'] != 'static':
+			print >>sys.stderr, 'Error: authenticate method is not static'
+			return False
+		# TODO: ask password
+		# TODO: confirm password
+		# TODO: random salt, set times, update password
+		data['times'] = 100
+		data['hash'] = self.static_hash(data, password)
+
+	def static_hash(self, data, password):
+		h = password
+		for i in xrange(max(data.get('times',1), 1):
+			h = hmac.new(data['salt'], h, sha).digest()
+		return binascii.b2a_hex(h)
+
+	def authenticate(self, username, password):
+		key = 'user-%s' % username
+		if key not in self.db: return False
+		data = simplejson.loads(self.db[key])
+		if data['method'] == 'static':
+			return static_hash(data, password) == data['hash']
+		elif data['method'] == 'totp':
+			return False # TODO
+		return False
+
+def userman(db, action, args):
+	username = None
+	method = 'static'
+	method_data = {'step':30}
+	optlist,args = getopt.getopt(args, 'm:k:s:p:')
+	for opt,value in optlist:
+		if opt == '-m': method = value
+		elif opt == '-k': method_data['key'] = value
+		elif opt == '-s': method_data['step'] = value
+		elif opt == '-p': method_data['pin'] = value
+	# "users" doesn't have a username arg
+	if args: username = args[0]
+
+	m = UserManager(db)
+	if action == 'users':
+		m.list()
+	elif action == 'useradd':
+		m.add(username, method, method_data)
+	elif action == 'usermod':
+		m.modify(username, method, method_data)
+	elif action == 'userdel':
+		m.delete(username)
+	elif action == 'passwd':
+		m.passwd(username)
+
+if __name__ == '__main__':
+	handler = logging.StreamHandler()
+	formatter = logging.Formatter('%(asctime)s pid=%(process)d %(levelname)s %(message)s')
+	handler.setFormatter(formatter)
+	logger = logging.getLogger(None)
+	logger.addHandler(handler)
+	logger.setLevel(logging.DEBUG)
+
+	if len(sys.argv) < 2:
+		print 'Usage:'
+		print '\tipguards daemon'
+		print '\tipguards users [-v]'
+		print '\tipguards useradd [-m static|totp] [-k <totp_hexkey>] [-s <totp_step>] [-p <totp_pin>] <username>'
+		print '\tipguards usermod [-m static|totp] [-k <totp_hexkey>] [-s <totp_step>] [-p <totp_pin>] <username>'
+		print '\tipguards userdel <username>'
+		print '\tipguards passwd <username>'
+		sys.exit(1)
+
+	action = sys.argv[1]
+	db = anydbm.open(DBMFILE, 'c', 0600)
+
+	if action == 'daemon':
+		daemon(db)
+	elif action.startswith('user') or action == 'passwd':
+		userman(db, action, argv[2:])
