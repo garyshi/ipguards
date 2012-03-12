@@ -1,3 +1,16 @@
+# Overview
+
+Servers on the internet with maintenance ports open to all address
+is quite dangerous: password scanners are everywhere, desktop
+computers are hard to hide from trojans which may contain key
+loggers and other malwares that will leak your password and server
+address. Once they're compromised, your server is at risk.
+
+IP Guards works with `iptables` to protect your server to restrict
+access to maintenance ports.
+
+This program is still under development.
+
 # Setup iptables
 
 You must create the chain and redirect traffic to it in default

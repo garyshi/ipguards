@@ -6,11 +6,19 @@ import anydbm
 import logging
 import simplejson
 import socket
-import SocketServer
+import threading
+from SocketServer import UnixStreamServer, ThreadingMixIn, StreamRequestHandler
 
 DBMFILE = '/tmp/ipguards.db'
 SOCKFILE = '/tmp/ipguards.sock'
 SOCKPWD= pwd.getpwnam('apache')
+
+def parse_request(line):
+	line = line.strip()
+	try: cmd,data = line.split(' ', 1)
+	except: cmd,data = line,''
+	data = simplejson.loads(data)
+	return cmd,data
 
 def add_rule(ipaddr):
 	socket.inet_aton(ipaddr) # validate the ipaddr
@@ -23,33 +31,62 @@ def del_rule(ipaddr):
 	cmdline = '/sbin/iptables -D ipguards_input -s %s -j ACCEPT' % ipaddr
 	return os.system(cmdline)
 
+def authenticate(username, password):
+	if username == 'test' and password == 'config': return True
+	return False
+
 class IPGuardHandler(StreamRequestHandler):
+	def handle_grant(req):
+		if not authenticate(req['username'], req['password']):
+			res = {'msg':'authentication failure'}
+			self.wfile.write('ERROR %s\n' % simplejson.dumps(res))
+			return False
+
+		res = {'ipaddr':req['ipaddr'], 'expire':long(time.time()) + req['ttl']}
+		self.server.db['%s@%s' % (req['username'], req['ipaddr'])] = res['expire']
+		add_rule(req['ipaddr'])
+
+		self.wfile.write('OK %s\n' % simplejson.dumps(res))
+		return True
+
 	def handle(self):
+		self.server.lock.acquire()
 		try:
-			line = self.rfile.readline()
-			data = simplejson.loads(line)
-			add_rule(data['ipaddr'])
+			cmd,req = parse_request(self.rfile.readline())
+			if cmd == 'GRANT':
+				self.handle_grant(req)
+			else:
+				res = {'msg':'invalid command'}
+				self.wfile.write('ERROR %s\n' % simplejson.dumps(res))
 		except:
 			self.wfile.write('ERROR\n')
-		else:
-			self.wfile.write('OK\n')
 		finally:
 			self.wfile.flush()
+			self.server.lock.release()
 
-class IPGuardServer(UnixStreamServer):
+class IPGuardServer(ThreadingMixIn, UnixStreamServer):
 	timeout = 60
 
+	def __init__(self, server_address, RequestHandlerClass):
+		self.lock = threading.Lock()
+		self.db = anydbm.open(DBMFILE, 'c', 0600)
+		super(IPGuardServer, self).__init__(server_address, RequestHandlerClass)
+
 	def handle_timeout(self):
-		now = long(time.time())
-		db = anydbm.open(DBMFILE, 'r')
+		self.lock.acquire()
 		try:
-			for key in db.keys():
-				data = simplejson.loads(db[key])
-				if data['expire'] - now <= 0:
-					del_rule(data['ipaddr'])
-					del db[key]
+			logging.info('handle_timeout')
+			now = long(time.time())
+			for key in self.db.keys():
+				if '@' in key:
+					data = simplejson.loads(db[key])
+					if data['expire'] - now <= 0:
+						user,ipaddr = key.split('@', 1)
+						logging.info('expire %s@%s' % (user, ipaddr))
+						del_rule(ipaddr)
+						del db[key]
 		finally:
-			db.close()
+			self.lock.release()
 
 if __name__ == '__main__':
 	try:

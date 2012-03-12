@@ -1,36 +1,43 @@
 #!/usr/bin/env python
 import os
 import time
-import anydbm
+import socket
 import simplejson
 import cgi, cgitb
 try: from cgi import parse_qs
 except: from urlparse import parse_qs
 
 cgitb.enable()
-DBMFILE = '/tmp/ipguards.db'
+SOCKFILE = '/tmp/ipguards.sock'
 
-def authenticate(username, password):
-	if username == 'test' and password == 'config': return True
-	return False
+def html_encode(s):
+	s = s.replace('&','&amp;')
+	s = s.replace('<','&lt;').replace('>','&gt;')
+	return s
 
-def expire_to_minutes(s):
+def ttl_to_seconds(s):
 	p = s.split(':')
 	p.reverse()
 	minutes = int(p[0])
 	if len(p) >= 2: minutes += int(p[1]) * 60
 	if len(p) >= 3: minutes += int(p[2]) * 60 * 24
-	return minutes
+	return minutes * 60
 
-def update_db(username, ipaddr, expire_minutes):
-	active_time = long(time.time())
-	expire_time = active_time + expire_minutes * 60
-	data = {'ipaddr':ipaddr, 'time':active_time, 'expire':expire_time}
+def send_request(cmd, data):
+	s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM, 0)
+	s.connect(SOCKFILE)
+	try:
+		sf = s.makefile('r+')
+		sf.write('%s %s\n' % (cmd, simplejson.dumps(data)))
+		sf.flush()
+		line = sf.readline().strip()
+		try: code,data = line.split(' ', 1)
+		except: code,data = line,''
+		data = simplejson.loads(data)
+	finally:
+		sf.close()
 
-	db = anydbm.open(DBMFILE, 'c', 0600)
-	db[username] = simplejson.dumps(data)
-	db.close()
-	return data
+	return code,data
 
 def display_form():
 	ipaddr = os.environ['REMOTE_ADDR']
@@ -38,18 +45,20 @@ def display_form():
 	print '<p>Username: <input type="text" name="username"></p>'
 	print '<p>Password: <input type="password" name="password"></p>'
 	print '<p>IP Address: <input type="text" name="ipaddr" value="%s"></p>' % ipaddr
-	print '<p>Expire Time: <input type="text" name="expire" value="1:00"></p>'
+	print '<p>Time-To-Live: <input type="text" name="ttl" value="1:00"></p>'
 	print '<p><input type="submit"></p>'
 	print '</form>'
 
 def submit_form():
 	form = cgi.FieldStorage()
-	username = form.getvalue('username')
-	if not authenticate(username, form.getvalue('password')):
-		return display_form()
-	expire_minutes = expire_to_minutes(form.getvalue('expire'))
-	data = update_db(username, form.getvalue('ipaddr'), expire_minutes)
-	print 'Access Granted until %s' % time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(data['expire']))
+	data = dict([(x,form.getvalue(x)) for x in ('username','password','ipaddr')])
+	data['ttl'] = ttl_to_seconds(form.getvalue('ttl'))
+	code,data = send_request('GRANT', data)
+	if code == 'OK':
+		expire_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(data['expire']))
+		print 'Access Granted for %s until %s' % (data['ipaddr'], expire_time)
+	else:
+		print 'Error:', html_encode(str(data))
 
 def main():
 	print 'Content-Type: text/html'
