@@ -1,12 +1,7 @@
 #!/usr/bin/python
-import sys
-import pwd
-import time
-import anydbm
-import logging
-import simplejson
-import socket
-import threading
+import sys, os, pwd, time
+import simplejson, anydbm
+import socket, threading, logging
 from SocketServer import UnixStreamServer, ThreadingMixIn, StreamRequestHandler
 
 DBMFILE = '/tmp/ipguards.db'
@@ -36,30 +31,36 @@ def authenticate(username, password):
 	return False
 
 class IPGuardHandler(StreamRequestHandler):
-	def handle_grant(req):
+	def handle_grant(self, req):
 		if not authenticate(req['username'], req['password']):
 			res = {'msg':'authentication failure'}
 			self.wfile.write('ERROR %s\n' % simplejson.dumps(res))
+			logging.info('returns: ERROR %s' % simplejson.dumps(res))
 			return False
 
 		res = {'ipaddr':req['ipaddr'], 'expire':long(time.time()) + req['ttl']}
-		self.server.db['%s@%s' % (req['username'], req['ipaddr'])] = res['expire']
+		self.server.db['%s@%s' % (req['username'], req['ipaddr'])] = str(res['expire'])
+		logging.info('db[%s@%s] <= %s' % (req['username'], req['ipaddr'], res['expire']))
 		add_rule(req['ipaddr'])
 
 		self.wfile.write('OK %s\n' % simplejson.dumps(res))
+		logging.info('returns: OK %s' % simplejson.dumps(res))
 		return True
 
 	def handle(self):
 		self.server.lock.acquire()
 		try:
-			cmd,req = parse_request(self.rfile.readline())
-			if cmd == 'GRANT':
-				self.handle_grant(req)
-			else:
-				res = {'msg':'invalid command'}
-				self.wfile.write('ERROR %s\n' % simplejson.dumps(res))
-		except:
-			self.wfile.write('ERROR\n')
+			try:
+				cmd,req = parse_request(self.rfile.readline())
+				logging.info('get request %s: %s' % (cmd, req))
+				if cmd == 'GRANT':
+					self.handle_grant(req)
+				else:
+					res = {'msg':'invalid command'}
+					self.wfile.write('ERROR %s\n' % simplejson.dumps(res))
+			except:
+				logging.exception('general handle exception')
+				self.wfile.write('ERROR\n')
 		finally:
 			self.wfile.flush()
 			self.server.lock.release()
@@ -70,7 +71,7 @@ class IPGuardServer(ThreadingMixIn, UnixStreamServer):
 	def __init__(self, server_address, RequestHandlerClass):
 		self.lock = threading.Lock()
 		self.db = anydbm.open(DBMFILE, 'c', 0600)
-		super(IPGuardServer, self).__init__(server_address, RequestHandlerClass)
+		UnixStreamServer.__init__(self, server_address, RequestHandlerClass)
 
 	def handle_timeout(self):
 		self.lock.acquire()
@@ -89,6 +90,17 @@ class IPGuardServer(ThreadingMixIn, UnixStreamServer):
 			self.lock.release()
 
 if __name__ == '__main__':
+	handler = logging.StreamHandler()
+	formatter = logging.Formatter('%(asctime)s pid=%(process)d %(levelname)s %(message)s')
+	handler.setFormatter(formatter)
+	logger = logging.getLogger(None)
+	logger.addHandler(handler)
+	logger.setLevel(logging.DEBUG)
+
+	# TODO: complain and exit, if ipguards_input chain doesn't exist
+	try: os.unlink(SOCKFILE)
+	except: pass
+
 	try:
 		server = IPGuardServer(SOCKFILE, IPGuardHandler)
 		os.chown(SOCKFILE, SOCKPWD.pw_uid, SOCKPWD.pw_gid)
