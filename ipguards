@@ -48,13 +48,10 @@ def del_rule(ipaddr):
 	cmdline = '/sbin/iptables -D ipguards_input -s %s -j ACCEPT' % ipaddr
 	return os.system(cmdline)
 
-def authenticate(username, password):
-	if username == 'test' and password == 'config': return True
-	return False
-
 class IPGuardHandler(StreamRequestHandler):
 	def handle_grant(self, req):
-		if not authenticate(req['username'], req['password']):
+		m = UserManager(db)
+		if not m.authenticate(req['username'], req['password']):
 			res = {'msg':'authentication failure'}
 			self.wfile.write('ERROR %s\n' % simplejson.dumps(res))
 			logging.info('returns: ERROR %s' % simplejson.dumps(res))
