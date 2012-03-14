@@ -3,7 +3,7 @@ import sys, os, pwd, time
 import getopt, termios
 # module sha is deprecated in new python, but it's hard to be compatible with
 # hmac module with sha and hashlib and keep the same code...
-import binascii, hmac, sha
+import binascii, hmac, sha, random
 import simplejson, anydbm
 import socket, threading, logging
 from SocketServer import UnixStreamServer, ThreadingMixIn, StreamRequestHandler
@@ -18,6 +18,9 @@ def parse_request(line):
 	except: cmd,data = line,''
 	data = simplejson.loads(data)
 	return cmd,data
+
+def randhex(num_bytes):
+	return ''.join([random.choice('0123456789abcdef') for i in xrange(num_bytes*2)])
 
 def sec_input(prompt=''):
 	s = None
@@ -108,7 +111,7 @@ class IPGuardServer(ThreadingMixIn, UnixStreamServer):
 		finally:
 			self.lock.release()
 
-def daemon(db):
+def daemon(db, action):
 	# TODO: complain and exit, if ipguards_input chain doesn't exist
 	try: os.unlink(SOCKFILE)
 	except: pass
@@ -127,17 +130,39 @@ class UserManager(object):
 		self.db = db
 
 	def list(self):
+		D = {}
+		nlen = 0
 		for key in self.db.iterkeys():
 			if not key.startswith('user-'): continue
 			data = simplejson.loads(self.db[key])
-			print key[5:]
+			D[key[5:]] = data
+			nlen = max(nlen, len(key)-5)
+		L = D.keys()
+		L.sort()
+		for username in L:
+			print '%*s %s' % (nlen, username, data) #data['method'])
 
 	def add(self, username, method, method_data):
+		key = 'user-%s' % username
+		if key in self.db:
+			print >>sys.stderr, 'Error: user already exists'
+			return False
+
 		data = {'method':method}
 		data.update(method_data)
-		self.db['user-%s' % username] = simplejson.dumps(data)
+		self.db[key] = simplejson.dumps(data)
+		return True
 
-	def modify(self, username):
+	def modify(self, username, method, method_data):
+		key = 'user-%s' % username
+		if key not in self.db:
+			print >>sys.stderr, 'Error: user does not exist'
+			return False
+
+		data = {'method':method}
+		data.update(method_data)
+		self.db[key] = simplejson.dumps(data)
+		return True
 
 	def delete(self, username):
 		del self.db['user-%s' % username]
@@ -145,21 +170,29 @@ class UserManager(object):
 	def passwd(self, username):
 		key = 'user-%s' % username
 		if key not in self.db:
-			print >>sys.stderr, 'Error: user not exist'
+			print >>sys.stderr, 'Error: user does not exist'
 			return False
+
 		data = simplejson.loads(self.db[key])
 		if data['method'] != 'static':
 			print >>sys.stderr, 'Error: authenticate method is not static'
 			return False
-		# TODO: ask password
-		# TODO: confirm password
-		# TODO: random salt, set times, update password
+
+		while True:
+			passwd1 = sec_input('Password: ')
+			passwd2 = sec_input('Confirm: ')
+			if passwd1 == passwd2: break
+			print >>sys.stderr, 'Password mismatch'
+
 		data['times'] = 100
-		data['hash'] = self.static_hash(data, password)
+		data['salt'] = randhex(8)
+		data['hash'] = self.static_hash(data, passwd1)
+		self.db[key] = simplejson.dumps(data)
+		return True
 
 	def static_hash(self, data, password):
 		h = password
-		for i in xrange(max(data.get('times',1), 1):
+		for i in xrange(max(data.get('times',1), 1)):
 			h = hmac.new(data['salt'], h, sha).digest()
 		return binascii.b2a_hex(h)
 
@@ -168,35 +201,54 @@ class UserManager(object):
 		if key not in self.db: return False
 		data = simplejson.loads(self.db[key])
 		if data['method'] == 'static':
-			return static_hash(data, password) == data['hash']
+			return self.static_hash(data, password) == data['hash']
 		elif data['method'] == 'totp':
 			return False # TODO
 		return False
 
 def userman(db, action, args):
-	username = None
 	method = 'static'
-	method_data = {'step':30}
+	method_data = {'pin':'', 'step':30}
 	optlist,args = getopt.getopt(args, 'm:k:s:p:')
 	for opt,value in optlist:
 		if opt == '-m': method = value
 		elif opt == '-k': method_data['key'] = value
 		elif opt == '-s': method_data['step'] = value
 		elif opt == '-p': method_data['pin'] = value
-	# "users" doesn't have a username arg
-	if args: username = args[0]
+
+	username = None
+	if action != 'users': username = args[0]
+
+	if action in ('useradd','usermod'):
+		if method == 'static':
+			for k in ('pin','key','step'):
+				if k in method_data: del method_data[k]
+		elif method == 'totp':
+			if 'key' not in method_data:
+				method_data['key'] = randhex(16)
+				print 'TOTP Random Key:', method_data['key']
+		else:
+			print >>sys.stderr, 'Error: invalid method'
+			return False
 
 	m = UserManager(db)
 	if action == 'users':
-		m.list()
+		return m.list()
 	elif action == 'useradd':
-		m.add(username, method, method_data)
+		return m.add(username, method, method_data)
 	elif action == 'usermod':
-		m.modify(username, method, method_data)
+		return m.modify(username, method, method_data)
 	elif action == 'userdel':
-		m.delete(username)
+		return m.delete(username)
 	elif action == 'passwd':
-		m.passwd(username)
+		return m.passwd(username)
+	elif action == 'auth':
+		password = sec_input('Password: ')
+		print m.authenticate(username, password)
+		return True
+	else:
+		print >>sys.stderr, 'Error: invalid action'
+		return False
 
 if __name__ == '__main__':
 	handler = logging.StreamHandler()
@@ -208,7 +260,7 @@ if __name__ == '__main__':
 
 	if len(sys.argv) < 2:
 		print 'Usage:'
-		print '\tipguards daemon'
+		print '\tipguards start|stop|restart|debug'
 		print '\tipguards users [-v]'
 		print '\tipguards useradd [-m static|totp] [-k <totp_hexkey>] [-s <totp_step>] [-p <totp_pin>] <username>'
 		print '\tipguards usermod [-m static|totp] [-k <totp_hexkey>] [-s <totp_step>] [-p <totp_pin>] <username>'
@@ -219,7 +271,11 @@ if __name__ == '__main__':
 	action = sys.argv[1]
 	db = anydbm.open(DBMFILE, 'c', 0600)
 
-	if action == 'daemon':
-		daemon(db)
-	elif action.startswith('user') or action == 'passwd':
-		userman(db, action, argv[2:])
+	if action == 'debug':
+		daemon(db, action)
+	elif action.startswith('user') or action == 'passwd' or action == 'auth':
+		userman(db, action, sys.argv[2:])
+	elif action == 'test':
+		m = UserManager(db)
+		print m.static_hash({'salt':'salt', 'times':1}, 'password')
+		print m.static_hash({'salt':'salt', 'times':2}, 'password')
