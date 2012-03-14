@@ -114,6 +114,7 @@ def daemon(db, action):
 	except: pass
 
 	try:
+		logging.info('server start')
 		server = IPGuardServer(SOCKFILE, IPGuardHandler)
 		os.chown(SOCKFILE, SOCKPWD.pw_uid, SOCKPWD.pw_gid)
 		os.chmod(SOCKFILE, 0600)
@@ -276,3 +277,11 @@ if __name__ == '__main__':
 		m = UserManager(db)
 		print m.static_hash({'salt':'salt', 'times':1}, 'password')
 		print m.static_hash({'salt':'salt', 'times':2}, 'password')
+	elif action == 'dump':
+		now = long(time.time())
+		keys = db.keys()
+		keys.sort()
+		for key in keys:
+			if '@' not in key: continue
+			expire_time = long(db[key])
+			print '%s: %ld (%d)' % (key, expire_time, expire_time - now)
