@@ -10,7 +10,9 @@ from SocketServer import UnixStreamServer, ThreadingMixIn, StreamRequestHandler
 
 DBMFILE = '/tmp/ipguards.db'
 SOCKFILE = '/tmp/ipguards.sock'
-SOCKPWD= pwd.getpwnam('apache')
+try: SOCKPWD = pwd.getpwnam('apache')
+except: SOCKPWD = pwd.getpwnam('www-data')
+TOTP_WINDOW_MINUTES = 10
 
 def parse_request(line):
 	line = line.strip()
@@ -201,7 +203,17 @@ class UserManager(object):
 		if data['method'] == 'static':
 			return self.static_hash(data, password) == data['hash']
 		elif data['method'] == 'totp':
-			return False # TODO
+			pin = data.get('pin')
+			step = data.get('step', 30)
+			window = TOTP_WINDOW_MINUTES * 60 / step
+			if pin:
+				if password[:len(p)] != pin: return False
+				password = password[len(p):]
+			cmdline = 'oathtool --totp -s %d -w %d %s %s 2>&1'
+			p = os.popen(cmdline % (step, window, data['key'], password))
+			p.read()
+			x = p.close()
+			return x is None
 		return False
 
 def userman(db, action, args):
